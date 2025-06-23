@@ -1,17 +1,25 @@
+
 import React, { useState, useEffect } from 'react';
 import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
+import axios from 'axios';
 import '../App.css';
 
 const VoiceToImage = () => {
   const [imageSets, setImageSets] = useState([{id: 0, images: [null, null, null], prompt: '', language: 'en-IN'}]);
   const [currentSetIndex, setCurrentSetIndex] = useState(0);
   const [selectedImageIndex, setSelectedImageIndex] = useState(null);
+  const [selectedImageForModification, setSelectedImageForModification] = useState(null);
   const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [savedImages, setSavedImages] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [language, setLanguage] = useState('en-IN');
+  const [folders, setFolders] = useState([]);
+  const [currentFolder, setCurrentFolder] = useState(null);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [showFolderInput, setShowFolderInput] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   
   const { transcript, resetTranscript, browserSupportsSpeechRecognition } = useSpeechRecognition({
     transcribing: true,
@@ -31,7 +39,93 @@ const VoiceToImage = () => {
     } else {
       setLanguage('en-IN'); // Default to English
     }
+    
+    // Load folders from localStorage
+    const storedFolders = localStorage.getItem('imageFolders');
+    if (storedFolders) {
+      setFolders(JSON.parse(storedFolders));
+    }
   }, []);
+
+  // Save folders to localStorage whenever folders change
+  useEffect(() => {
+    localStorage.setItem('imageFolders', JSON.stringify(folders));
+  }, [folders]);
+
+  const translateText = async (text, sourceLang) => {
+    if (sourceLang === 'en-IN') return text;
+    
+    setIsTranslating(true);
+    try {
+      // Using Google Translate API (you might need to set up your own API key)
+      // For now, using a simple translation service or fallback
+      const response = await axios.post('https://api.mymemory.translated.net/get', null, {
+        params: {
+          q: text,
+          langpair: `${sourceLang.split('-')[0]}|en`
+        }
+      });
+      
+      if (response.data && response.data.responseData) {
+        return response.data.responseData.translatedText;
+      }
+      return text; // Fallback to original text
+    } catch (error) {
+      console.error('Translation failed:', error);
+      return text; // Fallback to original text
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  const createFolder = () => {
+    if (!newFolderName.trim()) return;
+    
+    const newFolder = {
+      id: Date.now(),
+      name: newFolderName.trim(),
+      images: [],
+      createdAt: new Date().toISOString()
+    };
+    
+    setFolders([...folders, newFolder]);
+    setNewFolderName('');
+    setShowFolderInput(false);
+  };
+
+  const saveImageToFolder = (imageUrl, folderId, originalImage = null) => {
+    const updatedFolders = folders.map(folder => {
+      if (folder.id === folderId) {
+        const imageData = {
+          id: Date.now(),
+          url: imageUrl,
+          prompt: currentSet.prompt,
+          createdAt: new Date().toISOString(),
+          originalImage: originalImage
+        };
+        
+        // If this is a modification, save the original to pre-images
+        if (originalImage) {
+          const preImagesFolder = {
+            ...folder,
+            preImages: [...(folder.preImages || []), originalImage]
+          };
+          return {
+            ...preImagesFolder,
+            images: [...folder.images, imageData]
+          };
+        }
+        
+        return {
+          ...folder,
+          images: [...folder.images, imageData]
+        };
+      }
+      return folder;
+    });
+    
+    setFolders(updatedFolders);
+  };
 
   const generateImages = async (prompt, isRegeneration = false, selectedIdx = null) => {
     if (!prompt) {
@@ -42,10 +136,13 @@ const VoiceToImage = () => {
     setIsLoading(true);
     setError(null);
 
-    const form = new FormData();
-    form.append('prompt', prompt);
-
     try {
+      // Translate prompt if not in English
+      const translatedPrompt = await translateText(prompt, language);
+      
+      const form = new FormData();
+      form.append('prompt', translatedPrompt);
+
       const responses = await Promise.all([
         fetch('https://clipdrop-api.co/text-to-image/v1', {
           method: 'POST',
@@ -72,12 +169,20 @@ const VoiceToImage = () => {
       const newImageUrls = buffers.map(buffer => URL.createObjectURL(new Blob([buffer], { type: 'image/png' })));
       
       if (isRegeneration && selectedIdx !== null) {
+        // Store original image for pre-images folder
+        const originalImage = {
+          url: currentSet.images[selectedIdx],
+          prompt: currentSet.prompt,
+          modifiedAt: new Date().toISOString()
+        };
+        
         // Create a new set for regeneration
         const newSet = {
           id: imageSets.length,
           images: [...currentSet.images],
           prompt: `${currentSet.prompt} → ${prompt}`,
-          language
+          language,
+          originalImage
         };
         newSet.images[selectedIdx] = newImageUrls[0];
         
@@ -102,20 +207,21 @@ const VoiceToImage = () => {
     }
   };
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!transcript) {
       alert('Please provide a prompt by speaking.');
       return;
     }
     
     if (selectedImageIndex !== null) {
-      generateImages(transcript, true, selectedImageIndex);
+      await generateImages(transcript, true, selectedImageIndex);
     } else {
-      generateImages(transcript);
+      await generateImages(transcript);
     }
     SpeechRecognition.stopListening();
     setIsListening(false);
     resetTranscript();
+    setSelectedImageIndex(null);
   };
 
   const startListening = () => {
@@ -144,6 +250,11 @@ const VoiceToImage = () => {
     if (!savedImages.includes(url)) {
       setSavedImages([...savedImages, url]);
     }
+  };
+
+  const handleImageClick = (index) => {
+    setSelectedImageForModification(currentSet.images[index]);
+    setSelectedImageIndex(index);
   };
 
   const goBack = () => {
@@ -208,6 +319,39 @@ const VoiceToImage = () => {
         <h1 className="main-title">Sound Pix <span className="gradient-text">Voice to Image</span></h1>
         <p>Describe your image verbally, then generate visual magic</p>
         
+        {/* Folder Management */}
+        <div className="folder-management">
+          <h3>Image Folders</h3>
+          <div className="folder-controls">
+            <button onClick={() => setShowFolderInput(!showFolderInput)}>
+              <i className="fas fa-plus"></i> Create Folder
+            </button>
+            {showFolderInput && (
+              <div className="folder-input">
+                <input
+                  type="text"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="Enter folder name"
+                  onKeyPress={(e) => e.key === 'Enter' && createFolder()}
+                />
+                <button onClick={createFolder}>Create</button>
+                <button onClick={() => setShowFolderInput(false)}>Cancel</button>
+              </div>
+            )}
+          </div>
+          <div className="folders-list">
+            {folders.map(folder => (
+              <div key={folder.id} className="folder-item">
+                <span>{folder.name} ({folder.images.length} images)</span>
+                <button onClick={() => setCurrentFolder(folder)}>
+                  <i className="fas fa-eye"></i> View
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+        
         <div className="language-toggle">
           <button onClick={toggleLanguage}>
             <i className="fas fa-globe"></i> Switch Language: 
@@ -228,7 +372,8 @@ const VoiceToImage = () => {
           </div>
           
           <div className="transcript-box">
-            {transcript || (isListening ? 'Listening...' : 'Your description will appear here')}
+            {isTranslating ? 'Translating...' : 
+             transcript || (isListening ? 'Listening...' : 'Your description will appear here')}
           </div>
         </div>
         
@@ -243,13 +388,13 @@ const VoiceToImage = () => {
           
           <button 
             onClick={handleGenerate} 
-            disabled={isLoading || (!transcript && !isListening)}
+            disabled={isLoading || isTranslating || (!transcript && !isListening)}
             className="generate-button"
           >
             <i className="fas fa-magic"></i> Generate Images
           </button>
           
-          <button onClick={resetTranscript} disabled={isLoading}>
+          <button onClick={resetTranscript} disabled={isLoading || isTranslating}>
             <i className="fas fa-eraser"></i> Clear
           </button>
         </div>
@@ -270,21 +415,39 @@ const VoiceToImage = () => {
               <div 
                 key={index} 
                 className={`image-card ${selectedImageIndex === index ? 'selected' : ''}`}
-                onClick={() => setSelectedImageIndex(index)}
+                onClick={() => handleImageClick(index)}
               >
                 <img src={url} alt={`Generated ${index}`} />
                 <div className="image-actions">
-                  <button onClick={() => downloadImage(url)}>
+                  <button onClick={(e) => { e.stopPropagation(); downloadImage(url); }}>
                     <i className="fas fa-download"></i>
                   </button>
-                  <button onClick={() => saveImage(url)}>
+                  <button onClick={(e) => { e.stopPropagation(); saveImage(url); }}>
                     <i className="fas fa-save"></i>
                   </button>
+                  {folders.length > 0 && (
+                    <select onChange={(e) => {
+                      e.stopPropagation();
+                      const folderId = parseInt(e.target.value);
+                      if (folderId) {
+                        const originalImage = selectedImageForModification === url ? 
+                          currentSet.originalImage : null;
+                        saveImageToFolder(url, folderId, originalImage);
+                      }
+                    }}>
+                      <option value="">Save to folder...</option>
+                      {folders.map(folder => (
+                        <option key={folder.id} value={folder.id}>{folder.name}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
             ) : (
               <div key={index} className="image-card placeholder">
-                {isLoading ? 'Generating...' : 'Image will appear here'}
+                <div className={`loading-placeholder ${isLoading ? 'active' : ''}`}>
+                  {isLoading ? <div className="spinner"></div> : 'Image will appear here'}
+                </div>
               </div>
             )
           ))}
@@ -314,6 +477,42 @@ const VoiceToImage = () => {
           </div>
         )}
 
+        {/* Folder View Modal */}
+        {currentFolder && (
+          <div className="folder-modal">
+            <div className="folder-modal-content">
+              <div className="folder-modal-header">
+                <h2>{currentFolder.name}</h2>
+                <button onClick={() => setCurrentFolder(null)}>×</button>
+              </div>
+              <div className="folder-images">
+                {currentFolder.images.map((image, index) => (
+                  <div key={image.id} className="folder-image">
+                    <img src={image.url} alt={`${currentFolder.name} ${index}`} />
+                    <p>{image.prompt}</p>
+                    <div className="image-actions">
+                      <button onClick={() => downloadImage(image.url)}>
+                        <i className="fas fa-download"></i>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {currentFolder.preImages && currentFolder.preImages.length > 0 && (
+                  <div className="pre-images-section">
+                    <h4>Pre-Images (Modified Versions)</h4>
+                    {currentFolder.preImages.map((image, index) => (
+                      <div key={index} className="folder-image">
+                        <img src={image.url} alt={`Pre-image ${index}`} />
+                        <p>{image.prompt}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {savedImages.length > 0 && (
           <div className="saved-section">
             <h2><i className="fas fa-bookmark"></i> Saved Images</h2>
@@ -330,10 +529,10 @@ const VoiceToImage = () => {
           </div>
         )}
 
-        {isLoading && (
+        {(isLoading || isTranslating) && (
           <div className="loading">
             <div className="spinner"></div>
-            <p>Creating your images...</p>
+            <p>{isTranslating ? 'Translating your prompt...' : 'Creating your images...'}</p>
           </div>
         )}
         
