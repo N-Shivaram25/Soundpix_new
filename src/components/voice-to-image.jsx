@@ -26,7 +26,7 @@ const VoiceToImage = () => {
   });
 
   const currentSet = imageSets[currentSetIndex];
-  const CLIPDROP_API_KEY = 'ed15928b91fc7021dfe4d2164e6b2c05a9454cba4664adb32d266eea4d80c92d5c385feb240d5815f8f4e56e70397367';
+  const CLIPDROP_API_KEY = process.env.REACT_APP_CLIPDROP_API_KEY;
 
   useEffect(() => {
     // Auto-detect language based on browser settings
@@ -143,25 +143,31 @@ const VoiceToImage = () => {
         englishPrompt = await translateText(transcript);
       }
 
-      // Use RunwayML API for image generation
-      const response = await axios.post(
-        'https://api.runwayml.com/v1/image_generations',
-        {
-          prompt: englishPrompt,
-          num_images: 3,
-          width: 512,
-          height: 512
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.REACT_APP_RUNWAYML_API_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+      // Generate 3 images using ClipDrop API
+      const imagePromises = Array(3).fill().map(async () => {
+        const form = new FormData();
+        form.append('prompt', englishPrompt);
 
-      const newImages = response.data.images.map((image, index) => ({
-        url: image.url,
+        const response = await fetch('https://clipdrop-api.co/text-to-image/v1', {
+          method: 'POST',
+          headers: {
+            'x-api-key': CLIPDROP_API_KEY,
+          },
+          body: form,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const buffer = await response.arrayBuffer();
+        return URL.createObjectURL(new Blob([buffer], { type: 'image/png' }));
+      });
+
+      const imageUrls = await Promise.all(imagePromises);
+      
+      const newImages = imageUrls.map((url, index) => ({
+        url: url,
         prompt: englishPrompt,
         originalPrompt: transcript,
         timestamp: new Date().toLocaleString()
