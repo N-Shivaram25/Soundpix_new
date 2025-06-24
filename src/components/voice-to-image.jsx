@@ -53,23 +53,57 @@ const VoiceToImage = () => {
   }, [folders]);
 
   const translateText = async (text, sourceLang) => {
-    if (sourceLang === 'en-IN') return text;
+    if (sourceLang === 'en-IN' || !text || text.trim() === '') return text;
     
     setIsTranslating(true);
     try {
-      // Using Google Translate API (you might need to set up your own API key)
-      // For now, using a simple translation service or fallback
-      const response = await axios.post('https://api.mymemory.translated.net/get', null, {
-        params: {
-          q: text,
-          langpair: `${sourceLang.split('-')[0]}|en`
-        }
-      });
+      // Try multiple translation services for better reliability
+      let translatedText = text;
       
-      if (response.data && response.data.responseData) {
-        return response.data.responseData.translatedText;
+      // First try with MyMemory API
+      try {
+        const response = await axios.get('https://api.mymemory.translated.net/get', {
+          params: {
+            q: text,
+            langpair: `${sourceLang.split('-')[0]}|en`,
+            de: 'example@email.com'
+          },
+          timeout: 5000
+        });
+        
+        if (response.data && response.data.responseData && response.data.responseData.translatedText) {
+          translatedText = response.data.responseData.translatedText;
+        }
+      } catch (memoryError) {
+        console.log('MyMemory translation failed, using original text');
       }
-      return text; // Fallback to original text
+      
+      // If translation failed or returned the same text, try LibreTranslate as backup
+      if (translatedText === text && sourceLang !== 'en-IN') {
+        try {
+          const libreResponse = await axios.post('https://libretranslate.de/translate', {
+            q: text,
+            source: sourceLang.split('-')[0],
+            target: 'en',
+            format: 'text'
+          }, {
+            timeout: 5000,
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          });
+          
+          if (libreResponse.data && libreResponse.data.translatedText) {
+            translatedText = libreResponse.data.translatedText;
+          }
+        } catch (libreError) {
+          console.log('LibreTranslate failed, using original text');
+        }
+      }
+      
+      console.log(`Translation: "${text}" -> "${translatedText}"`);
+      return translatedText;
+      
     } catch (error) {
       console.error('Translation failed:', error);
       return text; // Fallback to original text
@@ -128,7 +162,7 @@ const VoiceToImage = () => {
   };
 
   const generateImages = async (prompt, isRegeneration = false, selectedIdx = null) => {
-    if (!prompt) {
+    if (!prompt || prompt.trim() === '') {
       setError('Please provide a description to generate images.');
       return;
     }
@@ -137,36 +171,65 @@ const VoiceToImage = () => {
     setError(null);
 
     try {
-      // Translate prompt if not in English
-      const translatedPrompt = await translateText(prompt, language);
+      // Clean and prepare the prompt
+      const cleanPrompt = prompt.trim();
+      console.log(`Original prompt: "${cleanPrompt}"`);
+      console.log(`Current language: ${language}`);
       
-      const form = new FormData();
-      form.append('prompt', translatedPrompt);
+      // Translate prompt if not in English
+      const translatedPrompt = await translateText(cleanPrompt, language);
+      console.log(`Translated prompt: "${translatedPrompt}"`);
+      
+      // Enhance the prompt for better image generation
+      const enhancedPrompt = `${translatedPrompt}, high quality, detailed, photorealistic`;
+      
+      // Create form data for each request
+      const createForm = () => {
+        const form = new FormData();
+        form.append('prompt', enhancedPrompt);
+        return form;
+      };
+
+      console.log('Generating 3 images with prompt:', enhancedPrompt);
 
       const responses = await Promise.all([
         fetch('https://clipdrop-api.co/text-to-image/v1', {
           method: 'POST',
           headers: { 'x-api-key': CLIPDROP_API_KEY },
-          body: form,
+          body: createForm(),
         }),
         fetch('https://clipdrop-api.co/text-to-image/v1', {
           method: 'POST',
           headers: { 'x-api-key': CLIPDROP_API_KEY },
-          body: form,
+          body: createForm(),
         }),
         fetch('https://clipdrop-api.co/text-to-image/v1', {
           method: 'POST',
           headers: { 'x-api-key': CLIPDROP_API_KEY },
-          body: form,
+          body: createForm(),
         }),
       ]);
 
-      if (!responses.every(response => response.ok)) {
-        throw new Error('Failed to generate images. Check your API key or credits.');
+      // Check for errors in responses
+      const failedResponses = responses.filter(response => !response.ok);
+      if (failedResponses.length > 0) {
+        const errorMessages = await Promise.all(
+          failedResponses.map(async (response) => {
+            try {
+              const errorText = await response.text();
+              return `Status ${response.status}: ${errorText}`;
+            } catch {
+              return `Status ${response.status}: Unknown error`;
+            }
+          })
+        );
+        throw new Error(`Failed to generate ${failedResponses.length} image(s). Errors: ${errorMessages.join(', ')}`);
       }
 
       const buffers = await Promise.all(responses.map(response => response.arrayBuffer()));
       const newImageUrls = buffers.map(buffer => URL.createObjectURL(new Blob([buffer], { type: 'image/png' })));
+      
+      console.log('Successfully generated', newImageUrls.length, 'images');
       
       if (isRegeneration && selectedIdx !== null) {
         // Store original image for pre-images folder
@@ -180,7 +243,8 @@ const VoiceToImage = () => {
         const newSet = {
           id: imageSets.length,
           images: [...currentSet.images],
-          prompt: `${currentSet.prompt} → ${prompt}`,
+          prompt: `${currentSet.prompt} → ${cleanPrompt}`,
+          translatedPrompt: enhancedPrompt,
           language,
           originalImage
         };
@@ -193,7 +257,8 @@ const VoiceToImage = () => {
         const newSet = {
           id: imageSets.length,
           images: newImageUrls,
-          prompt: prompt,
+          prompt: cleanPrompt,
+          translatedPrompt: enhancedPrompt,
           language
         };
         
@@ -201,7 +266,8 @@ const VoiceToImage = () => {
         setCurrentSetIndex(imageSets.length);
       }
     } catch (err) {
-      setError(err.message);
+      console.error('Image generation error:', err);
+      setError(`Image generation failed: ${err.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -374,6 +440,11 @@ const VoiceToImage = () => {
           <div className="transcript-box">
             {isTranslating ? 'Translating...' : 
              transcript || (isListening ? 'Listening...' : 'Your description will appear here')}
+            {transcript && (
+              <div className="transcript-info">
+                <small>Language: {language} | Length: {transcript.length} chars</small>
+              </div>
+            )}
           </div>
         </div>
         
